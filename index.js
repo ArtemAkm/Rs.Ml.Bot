@@ -26,6 +26,8 @@ const ownerId = config.adminID;
 const waitingForApproval = {}; 
 const bannedUsers = {};
 
+const rocketsFilePath = './check_world/Multiplayer/Persistent/Rockets.txt'; 
+
 const maxUsers = config.maxusers;
 
 const participants = loadParticipants();
@@ -52,7 +54,7 @@ function isUserBanned(userId) {
 }
 
 // Функция, выполняющаяся перед выполнением каждой команды
-bot.use((ctx, next) => {
+bot.use((ctx,next) => {
   const userId = String(ctx.from.id);
 
   // Проверяем, является ли пользователь администратором (ownerId)
@@ -61,16 +63,49 @@ bot.use((ctx, next) => {
 
   // Если пользователь не администратор и находится в списке забаненных, отказываем в выполнении команды
   if (!isAdmin && isUserBanned(userId)) {
-      ctx.reply(`
-Вы забанены и не можете использовать бота, если не согласны с решением администрации, обратитесь в техподдержку:
-
-@Morty_Flame - Rocket Space`);
-      return;
+    return;
   }
 
   // Продолжаем выполнение следующей команды
   next();
 });
+
+function getRocketNames(fileBuffer) {
+  try {
+    // Преобразовываем буфер в строку
+    const data = fileBuffer.toString('utf-8');
+
+    // Ищем все значения "rocketName" с использованием регулярного выражения
+    const rocketNamesMatch = data.match(/"rocketName":\s*"(.*?)"/g);
+
+    // Если найдены совпадения, извлекаем имена ракет из совпадений
+    const rocketNames = rocketNamesMatch
+      ? rocketNamesMatch.map((match) => match.match(/"rocketName":\s*"(.*?)"/)[1])
+      : [];
+
+    // Фильтруем пустые имена и проверяем на повторения
+    const nonEmptyRocketNames = rocketNames.filter((name) => name.trim() !== '');
+    const uniqueRocketNames = [...new Set(nonEmptyRocketNames)];
+
+    // Если количество уникальных имен меньше общего количества имен, значит есть повторения
+    if (uniqueRocketNames.length < nonEmptyRocketNames.length) {
+      const duplicates = nonEmptyRocketNames.filter((name, index, array) => array.indexOf(name) !== index);
+      return { result: 'repeat', duplicates };
+    }
+
+    return { result: 'success', rocketNames: uniqueRocketNames };
+  } catch (error) {
+    // Если возникает ошибка (например, файл не найден), возвращаем 'exists'
+    if (error.code === 'ENOENT') {
+      return { result: 'exists' };
+    }
+
+    // Если произошла другая ошибка, выводим ее в консоль и возвращаем пустой массив
+    console.error('Error reading Rockets file:', error.message);
+    return { result: 'error', error: error.message };
+  }
+}
+
 
 bot.start((ctx) => {
   const userId = ctx.from.id;
@@ -96,7 +131,7 @@ bot.start((ctx) => {
 Привет, ${firstname}! Я бот R. S. Multiplayer!
 
 Благодаря мне ты сможешь учавствовать в мультиплеере!
-Если у вас не открылась панель, нажмите на самую первую кнопку справа от поля ввода
+Для начала советую ознакомится с правилами, описанием и командами бота, удачи!
   `, { ...keyboard, parse_mode: 'Markdown' }); 
 });
 
@@ -253,59 +288,61 @@ function handleSystemFile(ctx, downloadLink) {
 // Функция обработки файла для команды /world
 async function handleWorldFile(ctx, downloadLink) {
   const userId = ctx.from.id;
-  
-  const exchangesFolderPath = path.join(__dirname, exchangesFolder);
-  const worldFolderPath = path.join(exchangesFolderPath, worldFolder);
-  const checkWorldFolderPath = path.join(exchangesFolderPath, checkWorldFolder);
+  const checkWorldFolderPath = path.join(__dirname, exchangesFolder, checkWorldFolder);
+  const worldExchangesFolderPath = path.join(__dirname, exchangesFolder, worldFolder);
 
-  // Создаем папку exchanges, если её нет
-  if (!fs.existsSync(exchangesFolderPath)) {
-    fs.mkdirSync(exchangesFolderPath);
-  }
-
-  // Создаем папку world, если её нет
-  if (!fs.existsSync(worldFolderPath)) {
-    fs.mkdirSync(worldFolderPath);
-  }
-
-  // Создаем папку check_world, если её нет
+  // Создаем папку exchanges/check_world, если её нет
   if (!fs.existsSync(checkWorldFolderPath)) {
-    fs.mkdirSync(checkWorldFolderPath);
+    fs.mkdirSync(checkWorldFolderPath, { recursive: true });
   }
 
-  // Формируем путь для сохранения файла
+  // Формируем путь для сохранения файла в check_world
   const fileName = `world.zip`;
-  const filePath = path.join(worldFolderPath, fileName);
+  const filePath = path.join(checkWorldFolderPath, fileName);
 
-  // Скачиваем файл
   try {
+    // Скачиваем файл
     await downloadFile(downloadLink, filePath);
 
-    // Проверяем наличие backup.txt внутри архива в папке Multiplayer\Backup
+    // Распаковываем архив
     const zip = new AdmZip(filePath);
-    const zipEntries = zip.getEntries();
-    const backupTxtEntry = zipEntries.find((entry) => {
-      const entryPath = entry.entryName.replace(/\\/g, '/'); // Заменяем обратные слеши на прямые
-      return entryPath.startsWith('Multiplayer/Backup/') && entryPath.endsWith('/backup.txt');
-    });
+    zip.extractAllTo(checkWorldFolderPath, /*overwrite*/ true);
 
-    if (!backupTxtEntry) {
-      ctx.reply('Файл не соответствует нормам мультиплеера, отправьте нужный файл');
-      clearDirectory(checkWorldFolderPath);
+    const rocketsFilePath = path.join(checkWorldFolderPath, 'Multiplayer', 'Persistent', 'Rockets.txt');
+
+    // Проверяем существование файла Rockets.txt
+    if (!fs.existsSync(rocketsFilePath)) {
+      ctx.reply('Ошибка: Файл Rockets.txt не найден в указанном пути.');
+      return;
+    }
+
+    // Проверяем содержимое файла Rockets.txt
+    const rocketsFileContents = fs.readFileSync(rocketsFilePath);
+    const rocketNamesResult = getRocketNames(rocketsFileContents);
+
+    if (rocketNamesResult.result === 'success') {
+      // Сохраняем результат в rockets.json
+      const rocketsJsonPath = path.join(__dirname, 'rockets.json');
+      fs.writeFileSync(rocketsJsonPath, JSON.stringify({ rocketNames: rocketNamesResult.rocketNames }));
+
+      // Перемещаем файл мира в папку /exchanges/world
+      const newWorldFilePath = path.join(worldExchangesFolderPath, fileName);
+      fs.renameSync(filePath, newWorldFilePath);
+
+      ctx.reply('Имена ракет успешно извлечены и сохранены в rockets.json. Файл мира успешно перемещен.');
+    } else if (rocketNamesResult.result === 'repeat') {
+      ctx.reply(`Ошибка: Обнаружены повторяющиеся имена ракет: ${rocketNamesResult.duplicates.join(', ')}`);
     } else {
-      // Перемещаем архив в папку world
-      fs.renameSync(filePath, path.join(worldFolderPath, fileName));
-      ctx.reply('Файл игрового мира успешно сохранен.');
-      await setUserStatusById(userId, null); // Сбрасываем статус ожидания файла
-      // Очищаем содержимое папки check_world
-      clearDirectory(checkWorldFolderPath);
+      ctx.reply('Ошибка при обработке файла Rockets.txt. Пожалуйста, проверьте структуру файла.');
     }
   } catch (error) {
-    console.error('Ошибка при скачивании файла:', error);
-    ctx.reply('Произошла ошибка при скачивании файла. Пожалуйста, попробуйте еще раз.');
-    await setUserStatusById(userId, null); // Сбрасываем статус ожидания файла
-    // Очищаем содержимое папки check_world
-    clearDirectory(checkWorldFolderPath);
+    console.error('Ошибка при обработке файла:', error);
+    ctx.reply('Произошла ошибка при обработке файла. Пожалуйста, попробуйте приписать команду еще раз.');
+  } finally {
+    // Сбрасываем статус ожидания файла
+    setUserStatusById(userId, null);
+    const directoryPath = checkWorldFolderPath;
+    clearDirectory(directoryPath);
   }
 }
 
@@ -315,9 +352,43 @@ function clearDirectory(directoryPath) {
 
   for (const file of files) {
     const filePath = path.join(directoryPath, file);
-    fs.unlinkSync(filePath);
+
+    if (fs.statSync(filePath).isDirectory()) {
+      // Если это директория, вызываем clearDirectory рекурсивно
+      clearDirectory(filePath);
+      // Удаляем пустую директорию
+      fs.rmdirSync(filePath);
+    } else {
+      // Если это файл, удаляем его
+      fs.unlinkSync(filePath);
+    }
   }
 }
+
+bot.command('checkfile', (ctx) => {
+  const solarSystemPath = path.join(__dirname, exchangesFolder, solarSystemFolder, 'solar_system.zip');
+  const worldPath = path.join(__dirname, exchangesFolder, worldFolder, 'world.zip');
+
+  const solarSystemStatus = fs.existsSync(solarSystemPath) ? '✅' : '❌';
+  const worldStatus = fs.existsSync(worldPath) ? '✅' : '❌';
+
+  const message = `
+Вот базовые файлы:
+${solarSystemStatus} Файл солнечной системы
+${worldStatus} Файл мира
+`;
+
+  
+
+  // Проверим, если оба файла существуют, и отправим дополнительное сообщение, если это так
+  if (solarSystemStatus === '✅' && worldStatus === '✅') {
+    ctx.reply(message);
+    ctx.reply('Я готов к старту игры! Просто напишите /begin как будете готовы.');
+  }
+  else{
+    ctx.reply(message);
+  }
+});
 
 
 bot.command('begin', async (ctx) => {
@@ -328,78 +399,6 @@ bot.command('begin', async (ctx) => {
     return;
   }
 
-  if (stazis) {
-    ctx.reply('Файлообмен находится в режиме стазиса. Сбросте его');
-    return;
-  }
-
-  const solarSystemFilePath = path.join(__dirname, exchangesFolder, solarSystemFolder, 'solar_system.zip');
-  const worldFilePath = path.join(__dirname, exchangesFolder, worldFolder, 'world.zip');
-
-  // Проверяем наличие файлов в папках solar_system и world
-  if (!fs.existsSync(solarSystemFilePath) || !fs.existsSync(worldFilePath)) {
-    ctx.reply('Ошибка: отсутствуют необходимые файлы для выполнения команды /begin.');
-    return;
-  }
-
-  // Здесь добавим логику по работе с участниками
-  const participants = loadParticipants();
-
-  if (participants.length === 0) {
-    ctx.reply('В файле participants.json нет записей. Добавьте участников перед началом файлообмена.');
-    return;
-  }
-
-  // Поиск записи с played: now
-  const activeParticipant = participants.find(participant => participant.played === 'now');
-
-  if (activeParticipant) {
-    // Устанавливаем статус 'player' в БД
-    await setUserStatusById(activeParticipant.id, 'player');
-    ctx.reply(`Продолжаем файлообмен для пользователя ${activeParticipant.username}. Ожидаем от него файл.`);
-    return;
-  } else {
-    const nextParticipant = participants.filter(participant => participant.played === false)
-    .reduce((min, participant) => (participant.queueNumber < min.queueNumber) ? participant : min, { queueNumber: Infinity });
-
-  if (nextParticipant.queueNumber !== Infinity) {
-    // Устанавливаем статус 'player' в БД
-    await setUserStatusById(nextParticipant.id, 'player');
-
-    // Отправляем сообщение с кнопками и файлами
-    const keyboard = Markup.inlineKeyboard([
-      Markup.button.callback('🌍 World', 'world'),
-      Markup.button.callback('🪐 Solar System', 'solar_system'),
-    ]);
-
-    await bot.telegram.sendMessage(nextParticipant.id, 'Вы выбраны для файлообмена. Выберите тип файла:', { reply_markup: keyboard });
-
-    // Устанавливаем played: now
-    nextParticipant.played = 'now';
-    saveParticipants(participants);
-
-    // Запускаем таймер на 12 часов
-    const endTime = new Date();
-    endTime.setHours(endTime.getHours() + 12);
-
-    timer = setInterval(() => {
-      const remainingTime = Math.ceil((endTime - new Date()) / (60 * 1000)); // Время в минутах
-
-      if (remainingTime > 0) {
-        if ([360, 300, 240, 180, 120, 60, 30, 10].includes(remainingTime)) {
-          bot.telegram.sendMessage(nextParticipant.id, `До окончания файлообмена осталось ${remainingTime} минут.`);
-        }
-      } else {
-        // Таймер истек, завершаем файлообмен
-        clearInterval(timer);
-        completeFileExchange(nextParticipant);
-      }
-    }, 60000); // Проверка каждую минуту
-  } else {
-    ctx.reply('Нет доступных участников. Добавьте участников перед началом файлообмена.');
-    stazis = true; // Переводим бота в режим стазиса
-  }
-}
   });
 
 bot.command('ban', (ctx) => {
